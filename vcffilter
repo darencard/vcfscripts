@@ -1,0 +1,154 @@
+#!/usr/bin/env python
+
+
+###########################
+##### IMPORT PACKAGES #####
+###########################
+
+import sys
+import argparse
+
+
+
+
+###########################
+##### IMPORT PACKAGES #####
+###########################
+
+## global list for vcf storage
+vcf_list = []
+
+
+
+
+############################
+##### ARGUMENT PARSING #####
+############################
+
+def parse_arguments():
+        parser = argparse.ArgumentParser(prog='vcffilter',
+                                                description='Confirm variants and filter \
+                                                VCF for only biallelic, PASS variants.')
+
+        parser.add_argument('--gq', dest='qual',
+                                action='store',
+                                default='20',
+                                help='genotype quality (GQ) threshold for individuals')
+        parser.add_argument('--depth', dest='depth',
+                                action='store',
+                                default='5',
+                                help='depth threshold for individuals')
+
+        ## parse arguments
+        args = parser.parse_args()
+        return args
+        
+        
+
+
+#####################
+##### FUNCTIONS #####
+#####################
+
+### Function to read VCF from STDIN ###
+
+def read_vcf():
+	## pull empty vcf list from global environment
+	global vcf_list
+	
+	## read lines from STDIN
+	line = sys.stdin.readline()
+	while line != "":
+		if line.startswith("#"):
+			sys.stdout.write(line)
+		else:
+			vcf_list.append(line)
+		
+		## read in next line from STDIN to keep stream going
+		line = sys.stdin.readline()
+
+	## close stream once empty line is hit (i.e., STDIN has ended)
+	sys.stdin.close()
+
+
+
+### Function to index desired FORMAT fields
+
+def get_format(format_field):
+	foo = format_field.split(":")
+	GT = foo.index("GT")
+	GQ = foo.index("GQ")
+	DP = foo.index("DP")
+	return GT, GQ, DP
+
+
+
+
+### Main function ###
+
+def main(argv):
+	## parse arguments
+	args = parse_arguments()   
+	
+	read_vcf()
+	
+	total_record_count = 0
+	pass_count = 0
+	out_count = 0
+
+	for record in vcf_list:
+		total_record_count += 1
+
+		ls = record.strip().split("\t")
+		new_record = []
+		ref_count = 0
+		alt_count = 0
+		(GT, GQ, DP) = get_format(ls[8])
+		if ls[6] == "PASS" and len(ls[4].split(",")) == 1:
+                	pass_count += 1
+
+			for element in range(0,len(ls)):
+				if element < 9:
+					new_record.append(ls[element])
+				else:
+					sample = ls[element].split(":")
+					if sample[GT] != "./.":
+						if int(sample[GQ]) < int(args.qual) or int(sample[DP]) < int(args.depth):
+							sample[GT] = "./."
+							if sample[GT] == "0/0":
+								ref_count += 2
+							elif sample[GT] == "1/1":
+								alt_count += 2
+							elif sample[GT] == "0/1" or sample[GT] == "1/0" or sample[GT] == "0|1" or sample[GT] == "1|0":
+								ref_count += 1
+								alt_count += 1
+							new_record.append(":".join(sample))
+						else:
+							if sample[GT] == "0/0":
+								ref_count += 2
+							elif sample[GT] == "1/1":
+								alt_count += 2
+ 							elif sample[GT] == "0/1" or sample[GT] == "1/0" or sample[GT] == "0|1" or sample[GT] == "1|0":
+ 								ref_count += 1
+ 								alt_count += 1
+ 							new_record.append(":".join(sample))
+ 							
+ 					else:
+ 						new_record.append(":".join(sample))
+
+ 						
+		if ref_count != 0 and alt_count != 0:
+			out_count += 1
+			sys.stdout.write("\t".join(new_record)+'\n')
+
+	sys.stderr.write("Summary:\n")
+	sys.stderr.write("number of input records: "+`total_record_count`+"\n")
+        sys.stderr.write("non-PASS or non-biallelic removed: "+`total_record_count - pass_count`+"\n")
+	sys.stderr.write("pseudo-variants removed: "+`pass_count - out_count`+"\n")
+	sys.stderr.write("number of output records: "+`out_count`+"\n")
+
+
+### Call main() ###
+
+if __name__ == '__main__':
+	main(sys.argv)

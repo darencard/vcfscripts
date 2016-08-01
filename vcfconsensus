@@ -1,0 +1,426 @@
+#!/usr/bin/env python
+
+
+###########################
+##### IMPORT PACKAGES #####
+###########################
+
+import sys
+import argparse
+import re
+import vcf
+
+
+############################
+##### GLOBAL VARIABLES #####
+############################
+
+## global dictionary for fasta storage
+dnaDict = {}
+
+
+############################
+##### ARGUMENT PARSING #####
+############################
+
+def parse_arguments():
+	parser = argparse.ArgumentParser(prog='vcfconsensus', 
+									description='Create consensus sequence by applying \
+									VCF variants to a reference fasta file.')
+
+	parser.add_argument('-H', dest='haplotype',
+						choices=['1','2'],
+						help='apply variants for the given haplotype. This option requires -s')
+	parser.add_argument('-i', dest='iupac',
+						action='store_true',
+						help='output variants in the form of IUPAC ambiguity codes')
+	parser.add_argument('-m', dest='miss',
+						choices=['ref','alt','sym','locus'],
+						help='how to deal with missing data: ref, alt, sym, locus')
+	parser.add_argument('-n', dest='symbol',
+						help='symbol to use for coding missing data',
+						default='N')		
+	parser.add_argument('-s', dest='sample',
+						help='apply variants of the given sample')
+	parser.add_argument('-v', dest='vcf',
+						required=True,
+						help='a tabix-indexed VCF file')
+
+	## parse arguments
+	args = parser.parse_args()
+	return args
+			
+
+#####################
+##### FUNCTIONS #####
+#####################
+
+### Function to read FASTA from STDIN ###
+
+def read_fasta():
+	## pull empty fasta dictionary from global environment
+	global dnaDict, help
+	seqName = ""
+	
+	## read lines from STDIN
+	line = sys.stdin.readline()
+	
+	## while lines are non-blank
+	while line != "":
+		## do nothing if it's an empty line (just in case)
+		if line.rstrip() == "":
+			line = sys.stdin.readline()
+			continue
+		
+		## if line begins with ">" indicating FASTA header line
+		if line[0] == ">":
+			## set sequence name to everything after ">"
+			seqName = line.rstrip().split(">")[1]
+			
+			## set regular expression query for header match (chromosome:start-end)
+			match = re.match('\w+\.\w+\:\d+\-\d+', seqName)
+			
+			## if sequence name structure doesn't match RE, throw error
+			if match is None:
+				sys.exit("\nERROR: fasta header format is incorrect!\n")
+			
+			## otherwise, split sequence elements into tuple in form (chrom, start, end)
+			## and make the tuple the dictionary key
+			else:
+				seqNameTuple = (seqName.split(":")[0], 
+								int(seqName.split(":")[1].split("-")[0]),
+								int(seqName.split(":")[1].split("-")[1]))				
+				dnaDict[seqNameTuple] = ""
+		
+		## if line not empty or doesn't begin with ">"
+		else:
+			## set dictionary value to the nucleotide sequence
+			dnaDict[seqNameTuple] = dnaDict[seqNameTuple] + line.rstrip()
+		
+		## read in next line from STDIN to keep stream going
+		line = sys.stdin.readline()
+		
+	## close stream once empty line is hit (i.e., STDIN has ended)
+	sys.stdin.close()
+	
+
+
+
+### Function to calculate relative position of variant in input sequence ###
+ 
+def calc_position(header_tuple, record):
+	variant = record.POS
+	start = header_tuple[1]
+	rel_pos = variant - start
+	return rel_pos
+
+
+
+
+### Function to confirm REF in VCF matches input reference sequence ###
+
+def confirm_ref(record, position, sequence):
+	ref = `record.REF`
+	alt = `record.ALT[0]`
+	ref_seq = `sequence[position]`
+	if ref.upper() == ref_seq.upper():
+		return True
+	else:
+		return False
+		
+		
+		
+
+### Function to translate heterozygous site into IUPAC symbol ###
+ 
+def convert_iupac(ref, alt):
+	if ref == "A" and alt == "G" or ref == "G" and alt == "A":
+		return "R"
+	if ref == "C" and alt == "T" or ref == "T" and alt == "C":
+		return "Y"
+	if ref == "G" and alt == "C" or ref == "C" and alt == "G":
+		return "S"
+	if ref == "A" and alt == "T" or ref == "T" and alt == "A":
+		return "W"
+	if ref == "G" and alt == "T" or ref == "T" and alt == "G":
+		return "K"
+	if ref == "A" and alt == "C" or ref == "C" and alt == "A":
+		return "M"
+
+
+
+
+### Function to determine consensus from multi-sample VCF ###
+
+def get_consensus(record, samples):
+	total = 0
+	ref = 0
+	missing = 0
+	
+	for sample in samples:
+		total += 2
+		geno = record.genotype(sample)['GT']
+		if geno == "0/0":
+			ref += 2
+		elif geno == "1/1":
+			ref += 0
+		elif geno == "1/0" or geno == "0/1" or geno == "1|0" or geno == "0|1":
+			ref += 1
+		else:
+			missing += 2
+		
+	if ref >= total/2:
+		return record.REF
+	else:
+		return record.ALT[0]
+		
+		
+		
+
+### Function to gather haplotype for a given sample ###
+
+def get_haplotype(record, sample, haplo, miss_symbol):
+	geno = record.genotype(sample)['GT']
+	if geno == "0/0":
+		return record.REF
+	elif geno == "1/1":
+		return record.ALT[0]
+	elif geno == "1/0" or geno == "0/1" or geno == "1|0" or geno == "0|1":
+		hap = re.split('\/|\|', geno)[int(haplo)-1]
+		if int(hap) == 0:
+			return record.REF
+		elif int(hap) == 1:
+			return record.ALT[0]
+	elif geno == "./.":
+		return miss_symbol
+
+
+
+
+### Function to gather variant from vcf record ###
+
+def get_variant(record, sample_list, sample, encode_type, miss_symbol):
+	if sample != False:
+	
+		if encode_type == "iupac":
+			geno = record.genotype(sample)['GT']
+			if geno == "1/0" or geno == "0/1" or geno == "1|0" or geno == "0|1":
+				nucl = convert_iupac(record.REF, record.ALT[0])
+			elif geno == "0/0":
+				nucl = record.REF
+			elif geno == "1/1":
+				nucl = record.ALT[0]
+			elif geno == "./.":
+				nucl = miss_symbol
+				
+		if encode_type == "1" or encode_type == "2":
+			nucl = get_haplotype(record, sample, encode_type, miss_symbol)
+			
+	if sample == False:
+	
+		if encode_type == "iupac":
+			nucl = convert_iupac(record.REF, record.ALT[0])
+			
+		if encode_type == "consensus":
+			nucl = get_consensus(record, sample_list)
+	
+	return nucl
+	
+	
+	
+	
+### Function to insert variants into sequence ###
+
+def make_new_seq(records, sequence, variants, miss_arg, miss_symbol):
+	seqlist = list(sequence)
+	for variant in range(0, len(variants)):
+		var = variants[variant]
+		record = records[variant]
+		nucl = var[1]
+		pos = var[0]
+		#print nucl, miss_symbol
+		
+		if nucl == `miss_symbol`:
+			if miss_arg == "locus":
+				for bp in range(0, len(seqlist)):
+					if seqlist[bp].islower():
+						seqlist[bp] = miss_symbol.lower()
+					else:
+						seqlist[bp] = miss_symbol.upper()
+		
+			elif miss_arg == "ref":
+				miss_nucl = record.REF
+				if seqlist[pos].islower():
+					replace = miss_nucl.lower()
+					seqlist[pos] = replace
+				else:
+					#print miss_nucl
+					seqlist[pos] = miss_nucl
+					
+			elif miss_arg == "alt":
+				miss_nucl = `record.ALT[0]`
+				if seqlist[pos].islower():
+					replace = miss_nucl.lower()
+					seqlist[pos] = replace
+				else:
+					#print miss_nucl
+					seqlist[pos] = miss_nucl
+					
+			elif miss_arg == "sym":
+				miss_nucl = miss_symbol
+				if seqlist[pos].islower():
+					replace = miss_nucl.lower()
+					seqlist[pos] = replace
+				else:
+					seqlist[pos] = miss_nucl
+		else:
+		
+			if seqlist[pos].islower():
+				replace = nucl.lower()
+				seqlist[pos] = replace
+			else:
+				#print nucl
+				seqlist[pos] = nucl
+	
+	out_sequence = "".join(seqlist)
+	out_sequence = out_sequence.replace("'", "")
+	return out_sequence
+
+
+
+		
+### Parent function to generate consensus sequence ###	
+	
+def consensus(header_tuple, sequence, vcf_records, sample_list, sample, haplotype, iupac, miss_arg, miss_symbol):
+	# initiate empty list to hold variants
+	variants = []
+	
+	# for record in vcf records within sequence coordinates
+	for record in vcf_records:
+#		print record, record.genotype(sample)['GT']
+		# calculate the relative position of variant in input sequence
+		position = calc_position(header_tuple, record)
+		
+		# confirm that the REF column in vcf matches the sequence nucleotide
+		check = confirm_ref(record, position, sequence)
+		# if it doesn't match, throw an error
+		if check == False:
+			sys.exit("\nERROR: VCF REF does not match sequence!\n")
+		
+		# otherwise...
+		else:
+			# if no sample id was provided
+			if sample == False:
+				# if iupac symbols were specified, get iupac variant
+				if iupac == True:
+					#print "A"
+					variant = get_variant(record, sample_list, False, "iupac", miss_symbol)
+				# otherwise, get consensus nucleotide
+				else:
+					#print "B"
+					variant = get_variant(record, sample_list, False, "consensus", miss_symbol)
+			
+			# if sample id was provided
+			else:
+				# make sure sample is in sample list, throw error if not
+				if sample not in sample_list:
+					sys.exit("\nERROR: Sample not in VCF!\n")
+					
+				# otherwise...
+				else:
+					# if iupac symbols were specified, get iupac variant
+					if iupac == True:
+						#print "C"
+						dumb_variant = get_variant(record, sample_list, sample, "iupac", miss_symbol)
+						variant = `dumb_variant`
+					# if haplotype specified, gather haplotype
+					if haplotype is not None:
+						#print "D"
+						dumb_variant = get_variant(record, sample_list, sample, haplotype, miss_symbol)
+						variant = `dumb_variant`
+						
+		# append variant and position to variants list in form [position, variant]				
+		variants.append([position, variant])
+	
+	# call function to perform sequence replacement and generate final sequence
+	new_seq = make_new_seq(vcf_records, sequence, variants, miss_arg, miss_symbol)
+	
+	# return final sequence for output in main()
+	return new_seq
+	
+
+
+### Main function ###
+
+def main(argv):
+	## parse arguments
+	args = parse_arguments()
+		
+	## read fasta from stdin
+	read_fasta()
+	
+	## initiate input vcf 
+	vcf_in = vcf.Reader(filename=args.vcf)
+	
+	## gather sample names from vcf
+	samples = vcf_in.samples
+	
+	## for sequence in fasta dictionary
+	for seqNameTuple in dnaDict:
+		## gather sequence and vcf records within sequence coordinates
+		seq = dnaDict[seqNameTuple]
+		records = vcf_in.fetch(seqNameTuple[0], seqNameTuple[1], seqNameTuple[2])
+
+		## assemble record list for passing
+		record_list = []
+		for record in records:
+			record_list.append(record)
+
+		## if no vcf records, use input sequence and warn user
+		if len(record_list) == 0:
+			sys.stderr.write("\nWARNING: No variants are available to be written to FASTA sequence "+seqName+"\n")
+			seq_out = seq
+		
+		## otherwise run one of following (based on options) to derive output sequence
+		else:
+			## if no sample, haplotype, or iupac options set
+			if args.sample == None and args.haplotype == None and args.iupac == False:
+				#print "1"
+				seq_out = consensus(seqNameTuple, seq, record_list, samples, False, False, False, args.miss, args.symbol.upper())
+			## if no sample or haplotype options set, but iupac option is set
+			elif args.sample == None and args.haplotype == None and args.iupac == True:
+				#print "2"
+				seq_out = consensus(seqNameTuple, seq, record_list, samples, False, False, True, args.miss, args.symbol.upper())
+			## if sample and iupac options are set, but haplotype option is not set
+			elif args.sample != None and args.haplotype == None and args.iupac == True:
+				#print "3"
+				seq_out = consensus(seqNameTuple, seq, record_list, samples, args.sample, False, True, args.miss, args.symbol.upper())
+			## if sample and haplotype options are set, but no iupac option is set
+			elif args.sample != None and args.haplotype != None and args.iupac == False:
+				#print "4"
+				seq_out = consensus(seqNameTuple, seq, record_list, samples, args.sample, args.haplotype, False, args.miss, args.symbol.upper())
+			## check to make sure sample is set if haplotype is set
+			elif args.sample == None and args.haplotype != None:
+				sys.exit("\nERROR: Applying variants for a haplotype requires -s!\n")
+			## check to make sure there are no weird combinations of -s, -H, and -i
+			else:
+				sys.exit("\nERROR: check options for mistakes!\n")
+		
+		## write output sequence in fasta format to stdout (same header as input)
+		sys.stdout.write(">"+seqNameTuple[0]+":"+`seqNameTuple[1]`+"-"+`seqNameTuple[2]`+"\n"
+						+seq_out+"\n")
+					
+
+			
+
+# check and make sure fasta header is okay	DONE
+# gather position in sequence string based on coordinates from fasta header
+# check to make sure vcf has ".gz" extension (maybe)
+# check that nucl at position in sequence string matches the reference
+# issue warning if no variants found in sequence range DONE
+# convert to iupac	
+# make sure sample is in vcf	DONE
+	
+if __name__ == '__main__':
+	main(sys.argv)
+	

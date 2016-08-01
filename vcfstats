@@ -1,0 +1,459 @@
+#!/usr/bin/env python
+
+
+###########################
+##### IMPORT PACKAGES #####
+###########################
+
+import math
+import sys
+import argparse
+import re
+import pandas as pd
+import numpy as np
+import cyvcf as vcf
+#import vcf
+
+
+############################
+##### GLOBAL VARIABLES #####
+############################
+
+## global dictionary for fasta storage
+regionsList = []
+
+
+############################
+##### ARGUMENT PARSING #####
+############################
+
+def parse_arguments():
+	parser = argparse.ArgumentParser(prog='vcfstats', 
+					description='Calculate population genetics \
+					statistics from a series of population VCF files \
+					and STDIN regions.')
+
+	parser.add_argument('--progress', dest='progress',
+						action='store_true',
+						help='print progress')
+	parser.add_argument('--header', dest='header',
+						action='store_true', 
+						help='include header on output statistics table')
+	parser.add_argument('files', nargs='*')
+
+	## parse arguments
+	args = parser.parse_args()
+	return args
+
+
+			
+
+#####################
+##### FUNCTIONS #####
+#####################
+
+### Function to read TAB from STDIN ###
+
+def read_tab():
+	## pull empty fasta dictionary from global environment
+	global regionsList
+	
+	## read lines from STDIN
+	line = sys.stdin.readline()
+	
+	## while lines are non-blank
+	while line != "":
+		## if line begins with ">" indicating FASTA header line
+		if len(line.rstrip().split("\t")) == 3:
+			## set sequence name to everything after ">"
+			chrom = line.rstrip().split("\t")[0]
+			if int(line.rstrip().split("\t")[1]) == 0:
+				start = 1
+			else:
+				start = int(line.rstrip().split("\t")[1])
+			if int(line.rstrip().split("\t")[1]) == 0:
+				end = int(line.rstrip().split("\t")[2]) + 1
+			else:
+				end = int(line.rstrip().split("\t")[2])
+			
+			regionsList.append([chrom, start, end])
+		
+		## if line not empty or doesn't begin with ">"
+		else:
+			sys.exit("\nERROR: input BED must contain 3 columns: chrom, start, end!\n")
+			## set dictionary value to the nucleotide sequence
+		
+		## read in next line from STDIN to keep stream going
+		line = sys.stdin.readline()
+		
+	## close stream once empty line is hit (i.e., STDIN has ended)
+	sys.stdin.close()
+
+
+
+
+### Function to parse and check VCF records ###
+
+def check_records(vcf_records, region):
+	record_list = []
+	for record in vcf_records:
+		record_list.append(record)
+		
+#	if len(record_list) == 0:
+#		sys.stderr.write("\nWARNING: No variants are available in "+region[0]+":"+`region[1]`+"-"+`region[2]`+"\n")
+
+	return record_list
+
+
+
+
+### Tajima's Theta (Pi) function ###
+
+def calc_pi(p_list, q_list, total_list, aln_length):
+	weight_avg_num = 0
+	na_list = []
+	for variant in range(0, len(total_list)):
+		p = p_list[variant]
+		q = q_list[variant]
+		n = total_list[variant]
+		if n != 0:
+			p_pi = (float(2)*p*q)/(n*(n-1))
+			q_pi = (float(2)*q*p)/(n*(n-1))
+			site_pi = p_pi + q_pi
+			weight_avg_num += site_pi
+		else:
+			na_list.append(0)
+			weight_avg_num += 0
+	
+	if len(total_list) == len(na_list):
+		pi = None
+	else:
+		pi = float(weight_avg_num)/aln_length	
+	
+	return pi
+
+
+
+
+### Tajima's D function ###
+
+def calc_tajd(theta_watterson, theta_tajima, total_calls, s, aln_length):
+	n = total_calls
+	if n != 0:
+		a1 = 0
+		a2 = 0
+		for num in range(1, n + 1):
+			a1 += 1/float(num)
+			a2 += 1/float(num**2)
+		b1 = (float(n)+1)/(3*(n-1))
+		b2 = (float(2)*(n**2+n+3))/(9*n*(n-1))
+		c1 = float(b1)-(1/a1)
+		c2 = b2-((float(n+2)/(a1*n)))+(a2/(a1**float(2)))
+		e1 = float(c1)/a1
+		e2 = float(c2)/((a1**2)+a2)
+		pS = float(s)/aln_length
+
+#		print a1, a2, b1, b2, c1, c2, e1, e2, pS, n			
+		tajd = (theta_tajima - theta_watterson)/math.sqrt((e1*pS)+(e2*pS*(pS-1)))
+	else:
+		tajd = None
+	
+	return tajd
+
+
+
+
+### Heterozygosity function ###
+
+def heterozygosity(record):
+	if record.num_called != 0:
+		p = ((2 * record.num_hom_ref) + record.num_het)/float(2 * record.num_called)
+		q = ((2 * record.num_hom_alt) + record.num_het)/float(2 * record.num_called)
+		heterozygosity = 1 - (p**2 + q**2)
+	else:
+		heterozygosity = None
+
+	return heterozygosity
+
+
+
+
+### Dxy function ###
+
+def calc_dxy(pop1_n_list, pop2_n_list, pop1_p_list, pop1_q_list, pop2_p_list, pop2_q_list, aln_length):
+	weighted_avg_dxy = 0
+	na_list = []
+	for variant in range(0, len(pop1_n_list)):
+		if pop1_n_list[variant] != 0 and pop2_n_list[variant] != 0:
+			pop1_freq_p = float(pop1_p_list[variant])/pop1_n_list[variant]
+			pop1_freq_q = float(pop1_q_list[variant])/pop1_n_list[variant]
+			pop2_freq_p = float(pop2_p_list[variant])/pop2_n_list[variant]
+			pop2_freq_q = float(pop2_q_list[variant])/pop2_n_list[variant]
+	
+			weighted_avg_dxy += ((pop1_freq_p * pop2_freq_q) + (pop2_freq_p * pop1_freq_q))
+		else:
+			na_list.append(0)
+			weighted_avg_dxy += 0
+
+        if len(pop1_n_list) == len(na_list):
+                Dxy = None
+        else:
+		Dxy = float(weighted_avg_dxy)/aln_length	
+	
+	return Dxy
+
+
+
+### Weir & Cockerham's Fst function ###
+
+def calc_wc_fst(pop1_n, pop2_n, pop1_p, pop1_q, pop2_p, pop2_q):
+	if pop1_n != 0 and pop2_n != 0:
+		pop1_freq_p = float(pop1_p)/pop1_n
+		pop1_freq_q = float(pop1_q)/pop1_n
+		pop2_freq_p = float(pop2_p)/pop2_n
+		pop2_freq_q = float(pop2_q)/pop2_n
+			
+		if pop1_freq_p == pop2_freq_p:
+			wc_fst = 0
+		else:
+			num1 = float(pop1_n * pop2_n)/(pop1_n + pop2_n)
+			num2 = float(1)/(pop1_n + pop2_n - 2)
+			num3 = (pop1_n * pop1_freq_p * pop1_freq_q) + (pop2_n * pop2_freq_p * pop2_freq_q)
+
+			den1 = num1
+			den2 = (pop1_freq_p - pop2_freq_p)**2
+			den3 = (2 * num1) - 1
+			den4 = num2
+			den5 = num3
+	
+#			print pop1_freq_p, pop1_freq_q, pop2_freq_p, pop2_freq_q
+#			print num1, num2, num3, den1, den2, den3, den4, den5
+	
+			numerator = 2 * num1 * num2 * num3
+			denominator = (den1 * den2) + (den3 * den4 * den5)
+	
+			wc_fst = 1 - (numerator / denominator)
+	else:
+		wc_fst = None
+
+
+	return wc_fst
+	
+	
+	
+
+### Function to calculate intrapopulation statistics within each population ###
+
+def intrapop_stats(region, records_list, pop):
+	aln_len = int(region[2])-int(region[1])
+	s = len(records_list)
+		
+	n_list = []
+	miss_list = []
+	p_list = []
+	q_list = []
+		
+	for record in records_list:
+		n_list.append(2*record.num_called)
+		miss_list.append(2*record.num_unknown)
+		p_list.append((2*record.num_hom_ref)+record.num_het)
+		q_list.append((2*record.num_hom_alt)+record.num_het)
+
+	n_total = 0
+	temp_n_count = 0
+	for record in n_list:
+		if record == 0:
+			n_total += 0
+		else:
+			n_total += record
+			temp_n_count += 1
+
+	if temp_n_count != 0:
+		n = int(float(n_total) / temp_n_count)
+	else:
+		n = 0
+	
+	a1 = 0
+	for num in range(1, n + 1):
+		a1 += 1/float(num)
+			
+	intra_df = pd.DataFrame()
+	
+	for record in records_list:
+		if n != 0:
+			theta_watterson = (float(s)/aln_len)/a1
+		else:
+			theta_watterson = None
+	
+		theta_tajima = calc_pi(p_list, q_list, n_list, aln_len)
+			
+		tajima_d = calc_tajd(theta_watterson, theta_tajima, n, s, aln_len)
+		
+		heterozyg = heterozygosity(record)
+
+		if pop == 'pop1':
+			record_out = pd.Series([record.CHROM, `record.POS`, `region[1]`, `region[2]`, record.REF, record.ALT[0], 
+					`(2*record.num_hom_ref)+record.num_het`, `(2*record.num_hom_alt)+record.num_het`, `2*record.num_unknown`,
+					heterozyg, theta_tajima, theta_watterson, tajima_d], 
+					index=['chrom', 'var_pos', 'start', 'end', 'ref', 'alt',
+					pop+'_p_cnt', pop+'_q_cnt', pop+'_miss_cnt',
+					pop+'_heterozygosity', pop+'_theta_tajima', pop+'_theta_watterson', pop+'_tajima_d'])
+		
+		else:
+			record_out = pd.Series([`(2*record.num_hom_ref)+record.num_het`, `(2*record.num_hom_alt)+record.num_het`, `2*record.num_unknown`,
+					heterozyg, theta_tajima, theta_watterson, tajima_d],
+					index=[pop+'_p_cnt', pop+'_q_cnt', pop+'_miss_cnt',
+					pop+'_heterozygosity', pop+'_theta_tajima', pop+'_theta_watterson', pop+'_tajima_d'])
+						
+		intra_df = intra_df.append(record_out, ignore_index=True)
+		
+		cols = list(record_out.index.values)
+		
+		intra_df = intra_df[cols]
+				
+	return intra_df
+
+
+
+
+### Function to calculate pairwise interpopulation statistics between each population pair ###
+
+def interpop_stats(region, pop1_records_list, pop2_records_list, pop1, pop2):
+	aln_len = int(region[2])-int(region[1])
+	s1 = len(pop1_records_list)
+	s2 = len(pop2_records_list)
+	
+	n1_list = []
+	n2_list = []
+	p1_list = []
+	p2_list = []
+	q1_list = []
+	q2_list = []
+	
+	for i in range(0, s1):
+		n1_list.append(2*pop1_records_list[i].num_called)
+		n2_list.append(2*pop2_records_list[i].num_called)
+		p1_list.append((2*pop1_records_list[i].num_hom_ref) + pop1_records_list[i].num_het)
+		q1_list.append((2*pop1_records_list[i].num_hom_alt) + pop1_records_list[i].num_het)
+		p2_list.append((2*pop2_records_list[i].num_hom_ref) + pop2_records_list[i].num_het)
+		q2_list.append((2*pop2_records_list[i].num_hom_alt) + pop2_records_list[i].num_het)
+			
+	inter_df = pd.DataFrame()
+	
+	for record in range(0, s1):
+		dxy = calc_dxy(n1_list, n2_list, p1_list, q1_list, p2_list, q2_list, aln_len)
+		
+		wc_fst = calc_wc_fst(n1_list[record], n2_list[record], p1_list[record], q1_list[record], p2_list[record], q2_list[record])
+
+		record_out = pd.Series([dxy, wc_fst], 
+					index=[pop1+'_'+pop2+'_dxy', pop1+'_'+pop2+'_wc_fst'])
+										
+		inter_df = inter_df.append(record_out, ignore_index=True)
+		
+		cols = list(record_out.index.values)
+		
+		inter_df = inter_df[cols]
+				
+	return inter_df
+		
+		
+		
+
+### Main function ###
+
+def main(argv):
+	## parse arguments
+	args = parse_arguments()
+	
+	read_tab()
+	
+	locus_counter = 0
+	locus_length = []
+	scaffold_list = []
+	variant_counter = 0
+	head_counter = 0
+	
+	for region in regionsList:
+		locus_counter += 1
+		if args.progress is True:
+			sys.stderr.write('\t'.join([str(x) for x in region])+'\n')
+		
+		locus_length.append(region[2] - region[1])
+		scaffold_list.append(region[0])
+
+		region_data = pd.DataFrame()
+		
+		file_list = []
+			
+		for file1 in range(0, len(args.files)):
+			pop1 = "pop"+`file1 + 1`
+			file_list.append(pop1+' = '+args.files[file1])
+			if file1 > len(args.files) - 1:
+ 				vcf1 = vcf.Reader(filename=args.files[file1])
+ 				records1 = vcf1.fetch(region[0], region[1], region[2])
+ 				records1_list = check_records(records1, region)
+ 				if len(records1_list) == 0:
+					sys.stderr.write("\nWARNING: No variants are available in "
+					+region[0]+":"+`region[1]`+"-"+`region[2]`+" for population "
+					+args.files[file1]+"\n")
+				else:
+					intra_stats = intrapop_stats(region, records1_list, pop1)
+ 					region_data = pd.concat([region_data, intra_stats], axis=1)
+					
+			else:
+				vcf1 = vcf.Reader(filename=args.files[file1])
+				records1 = vcf1.fetch(region[0], region[1], region[2])
+ 				records1_list = check_records(records1, region)
+ 				variant_counter += len(records1_list)
+				if len(records1_list) == 0:
+					sys.stderr.write("\nWARNING: No variants are available in "
+                                        +region[0]+":"+`region[1]`+"-"+`region[2]`+" for population "
+					+args.files[file1]+"\n")
+				else:
+					intra_stats = intrapop_stats(region, records1_list, pop1)
+					region_data = pd.concat([region_data, intra_stats], axis=1)
+				
+				for file2 in range(file1 + 1, len(args.files)):
+					pop2 = "pop"+`file2 + 1`
+ 					vcf2 = vcf.Reader(filename=args.files[file2])
+ 					records2 = vcf2.fetch(region[0], region[1], region[2])
+ 					records2_list = check_records(records2, region)
+#					if len(records2_list) == 0:
+#						sys.stderr.write("\nWARNING: No variants are available in "
+#						+region[0]+":"+`region[1]`+"-"+`region[2]`+" for population "
+#						+args.files[file2]+"\n")
+#					else:
+					inter_stats = interpop_stats(region, records1_list, records2_list, pop1, pop2)
+					region_data = pd.concat([region_data, inter_stats], axis=1)
+		
+		if region_data.empty is False:		
+			head_counter += 1
+			if head_counter == 1:
+#				region_data = region_data.T.drop_duplicates().T
+				final_out = region_data.round(3).to_csv(sep="\t", index=False, na_rep='NA', header=args.header)	
+	 		else:
+#				region_data = region_data.T.drop_duplicates().T
+				final_out = region_data.round(3).to_csv(sep="\t", index=False, na_rep='NA', header=False)	
+		
+		else:
+			final_out = ""
+
+
+		sys.stdout.write(final_out) 
+
+	sys.stderr.write('\nSummary:\n'+
+ 			'processed '+`locus_counter`+' loci\n'+
+			'average (+/- standard deviation) locus length = '+`round(np.mean(locus_length), 2)`+
+			' ('+`round(np.std(locus_length), 2)`+')\n'+
+			'processed '+`len(set(scaffold_list))`+' scaffolds/contigs\n'+
+			'processed '+`variant_counter/len(args.files)`+' variants\n'+
+			'processed '+`len(args.files)`+' populations\n'+
+			'\n'.join([str(x) for x in file_list])+'\n\n')
+ 	
+
+ 						
+	
+### Call Main() ###
+
+if __name__ == '__main__':
+	main(sys.argv)
