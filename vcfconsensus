@@ -1,5 +1,19 @@
 #!/usr/bin/env python
 
+###########################
+#####      USAGE      #####
+###########################
+
+# Options can be viewed by running vcfconsensus -h
+# vcfconsensus emmulates bcftools consensus in its operation.
+# This program reads from STDIN and writes to STDOUT.
+# It is therefore meant to be called in a pipe.
+# STDIN is the FASTA reference sequence with a properly-formated header:
+#	chr:start-end
+# vcfconsensus uses the supplied tabix-indexed VCF to insert variants (only tested on SNPs).
+# STDOUT is a FASTA sequence with the variants inserted.
+
+
 
 ###########################
 ##### IMPORT PACKAGES #####
